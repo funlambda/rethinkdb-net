@@ -4,6 +4,7 @@ using System.Linq.Expressions;
 using System.Reflection;
 using RethinkDb.DatumConverters;
 using RethinkDb.Spec;
+using System.Linq;
 
 namespace RethinkDb.QueryTerm
 {
@@ -41,7 +42,8 @@ namespace RethinkDb.QueryTerm
 
             if (indexOrderBy != null)
             {
-                orderByTerm.optargs.Add(new Term.AssocPair() {
+                orderByTerm.optargs.Add(new Term.AssocPair()
+                {
                     key = "index",
                     val = indexOrderBy
                 });
@@ -70,16 +72,19 @@ namespace RethinkDb.QueryTerm
                     if (indexOrderBy != null)
                         throw new InvalidOperationException("Sorting by multiple indexes is not supported");
 
-                    var indexReference = new Term() {
+                    var indexReference = new Term()
+                    {
                         type = Term.TermType.DATUM,
-                        datum = new Datum() {
+                        datum = new Datum()
+                        {
                             type = Datum.DatumType.R_STR,
                             r_str = orderByMember.IndexName
                         }
                     };
                     if (direction == OrderByDirection.Ascending)
                     {
-                        var newFieldRef = new Term() {
+                        var newFieldRef = new Term()
+                        {
                             type = Term.TermType.ASC,
                         };
                         newFieldRef.args.Add(indexReference);
@@ -87,7 +92,8 @@ namespace RethinkDb.QueryTerm
                     }
                     else if (direction == OrderByDirection.Descending)
                     {
-                        var newFieldRef = new Term() {
+                        var newFieldRef = new Term()
+                        {
                             type = Term.TermType.DESC,
                         };
                         newFieldRef.args.Add(indexReference);
@@ -116,33 +122,12 @@ namespace RethinkDb.QueryTerm
                     else
                         throw new NotSupportedException("Unsupported expression type " + body.NodeType + "; expected MemberAccess or Call");
 
-                    if (memberExpr.Expression.NodeType != ExpressionType.Parameter)
-                        throw new NotSupportedException("Unrecognized member access pattern");
-
-                    var fieldReference = new Term() {
-                        type = Term.TermType.DATUM,
-                        datum = new Datum() {
-                            type = Datum.DatumType.R_STR,
-                            r_str = fieldConverter.GetDatumFieldName(memberExpr.Member)
-                        }
-                    };
+                    Term fieldReference = GetFieldReferenceTerm(memberExpr, fieldConverter);
 
                     if (direction == OrderByDirection.Ascending)
-                    {
-                        var newFieldRef = new Term() {
-                            type = Term.TermType.ASC,
-                        };
-                        newFieldRef.args.Add(fieldReference);
-                        fieldReference = newFieldRef;
-                    }
+                        fieldReference = MakeTerm(Term.TermType.ASC, fieldReference);
                     else if (direction == OrderByDirection.Descending)
-                    {
-                        var newFieldRef = new Term() {
-                            type = Term.TermType.DESC,
-                        };
-                        newFieldRef.args.Add(fieldReference);
-                        fieldReference = newFieldRef;
-                    }
+                        fieldReference = MakeTerm(Term.TermType.DESC, fieldReference);
                     else
                         throw new NotSupportedException();
 
@@ -151,6 +136,66 @@ namespace RethinkDb.QueryTerm
             }
 
             return retval;
+        }
+
+        private Term GetFieldReferenceTerm(MemberExpression memberExpr, IObjectDatumConverter fieldConverter)
+        {
+            if (memberExpr.Expression.NodeType == ExpressionType.MemberAccess)
+                return GetMultiPartReferenceTerm(memberExpr);
+
+            if (memberExpr.Expression.NodeType != ExpressionType.Parameter)
+                throw new NotSupportedException("Unrecognized member access pattern");
+
+            return MakeDatumTerm(new Datum() { type = Datum.DatumType.R_STR, r_str = fieldConverter.GetDatumFieldName(memberExpr.Member) });
+        }
+
+        private Term GetMultiPartReferenceTerm(Expression memberExpr)
+        {
+            IList<string> fields = new List<string>();
+
+            while (memberExpr.NodeType == ExpressionType.MemberAccess)
+            {
+                var member = ((MemberExpression)memberExpr).Member;
+                var fieldName = member.Name;
+                fields.Add(fieldName);
+                memberExpr = ((MemberExpression)memberExpr).Expression;
+            }
+
+            Term fieldAccessTerm = MakeTerm(Term.TermType.VAR, MakeDatumTerm(new Datum { type = Datum.DatumType.R_NUM, r_num = 1 }));
+            foreach (var field in fields.Reverse())
+            {
+                fieldAccessTerm = MakeGetFieldTerm(fieldAccessTerm, field);
+            }
+
+            return MakeTerm(Term.TermType.FUNC,
+                            MakeDatumTerm(MakeArrayDatum(new Datum { type = Datum.DatumType.R_NUM, r_num = 1 })),
+                            fieldAccessTerm);
+        }
+
+        private Term MakeTerm(Term.TermType type, params Term[] args)
+        {
+            var term = new Term { type = type };
+            term.args.AddRange(args);
+            return term;
+        }
+
+        private Term MakeDatumTerm(Datum datum)
+        {
+            return new Term { type = Term.TermType.DATUM, datum = datum };
+        }
+
+        private Datum MakeArrayDatum(params Datum[] arr)
+        {
+            var datum = new Datum { type = Datum.DatumType.R_ARRAY };
+            datum.r_array.AddRange(arr);
+            return datum;
+        }
+
+        private Term MakeGetFieldTerm(Term term, string fieldName)
+        {
+            return MakeTerm(Term.TermType.GET_FIELD,
+                            term,
+                            MakeDatumTerm(new Datum { type = Datum.DatumType.R_STR, r_str = fieldName }));
         }
     }
 }
